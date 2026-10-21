@@ -7,7 +7,10 @@ authors = [
     { name = "Konjac", email = "toshi_0301mm@icloud.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "openai>=3.31.0",
+    "python-dotenv>=1.2.4",
+]
 
 [project.scripts]
 my-llm-app = "my_llm_app:main"
