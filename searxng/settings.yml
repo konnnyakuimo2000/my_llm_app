@@ -1,0 +1,13 @@
+# SearXNG の設定（既定値に対する差分だけを書く）
+# secret_key はここに書かず、環境変数 SEARXNG_SECRET (.env) から渡す
+use_default_settings: true
+
+server:
+  limiter: false          # Open WebUI からしか使わない内部用なのでレート制限は不要
+  image_proxy: false
+
+search:
+  default_lang: "ja"      # 日本語の結果を優先
+  formats:
+    - html
+    - json                # Open WebUI からの検索に必須（ないと 403）
