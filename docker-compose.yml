@@ -23,7 +23,8 @@ services:
 
   searxng:
     image: searxng/searxng:2026.10.19-81371861f
-    # ホストには公開しない（Open WebUI から内部ネットワーク経由でのみ使う）
+    ports:
+      - "127.0.0.1:8888:8080"   # 開発用: この PC のエージェントからのみ使う（外部には公開しない）
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     environment:

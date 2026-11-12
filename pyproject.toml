@@ -8,6 +8,8 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28.1",
+    "langgraph>=1.2.20",
     "openai>=3.31.0",
     "python-dotenv>=1.2.4",
 ]
@@ -18,3 +20,11 @@ my-llm-app = "my_llm_app:main"
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
