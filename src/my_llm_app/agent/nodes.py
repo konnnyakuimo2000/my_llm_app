@@ -15,7 +15,7 @@ from langgraph.types import interrupt
 
 from my_llm_app.agent import prompts
 from my_llm_app.agent.guard import check_decision
-from my_llm_app.agent.state import AgentState, Candidate, Source
+from my_llm_app.agent.state import DOMINANCE_RATIO, AgentState, Candidate, Source
 from my_llm_app.config import Settings
 from my_llm_app.llm import LLM
 from my_llm_app.tools import searxng, wikimedia
@@ -78,8 +78,15 @@ class Nodes:
         except Exception as e:  # noqa: BLE001
             errors.append(f"wikidata(get): {e}")
             info = {e.id: e for e in entities}
-        candidates = [as_candidate(info[i]) for i in chosen if i in info] or state.get("candidates", [])
+        candidates = rank([as_candidate(info[i]) for i in chosen if i in info]) or state.get("candidates", [])
         target = state.get("target") or (as_candidate(info[target_id]) if target_id in info else None)
+        assumptions = state.get("assumptions", [])
+        if not target and (primary := dominant(candidates)):
+            target = primary
+        if target and not state.get("target") and not state.get("clarifications"):
+            # 利用者に確かめずに対象を決めた場合は、その判断を前提として報告に書く
+            assumptions = assumptions + [assumption_text(state["request"], target, candidates,
+                                                         by_dominance=target == dominant(candidates))]
 
         # 根拠の URL は、実際に取得した検索結果・項目のものだけを認める（設計書 M-4 の簡易版）
         pages = {**state.get("pages", {}),
@@ -93,6 +100,7 @@ class Nodes:
             "unknown": update["unknown"],
             "candidates": candidates,
             "target": target,
+            "assumptions": assumptions,
             "searched": state.get("searched", []) + [query],
             "unresponsive": sorted(set(state.get("unresponsive", []) + web.unresponsive)),
             "pages": pages,
@@ -125,16 +133,39 @@ class Nodes:
         answer = str(interrupt({"question": question})).strip()
         result: dict = {"questions_asked": state.get("questions_asked", 0) + 1}
 
-        # 番号での回答は、プログラムが選択肢と対応づける（LLM には番号付きの選択肢が見えないため）
-        picked = pick_candidate(answer, state.get("candidates", []))
-        if picked:
-            result["target"] = picked
-            answer_text = f"{answer}（{picked['label']}: {picked['description']}）"
+        result["last_question"] = question
+        candidates = state.get("candidates", [])
+
+        # 回答を選択肢と照らし合わせて、その場で対象を決める（決めないまま進むと同じ質問を繰り返すため）
+        # 番号での回答はプログラムが対応づける（LLM には番号付きの選択肢が見えないため）
+        picked = pick_candidate(answer, candidates)
+        matched = [picked] if picked else self._match_answer(question, answer, candidates)
+        if len(matched) == 1:
+            result["target"] = matched[0]
+            answer_text = f"{answer}（{matched[0]['label']}: {matched[0]['description']}）"
+        elif len(matched) >= 2:
+            # 回答に合う候補が複数（例:「山です」）→ 候補を絞る。一般的な意味が 1 つに偏っていればそれを選ぶ
+            result["candidates"] = matched
+            answer_text = f"{answer}（該当しうる候補: " + "、".join(c["label"] + "/" + c["description"] for c in matched) + "）"
+            if primary := dominant(matched):
+                result["target"] = primary
+                result["assumptions"] = state.get("assumptions", []) + [
+                    assumption_text(state["request"], primary, matched)]
         else:
-            answer_text = answer
+            answer_text = answer   # 選択肢にない内容（例:「川のほうです」）→ 次の検索で対象を探す
         result["clarifications"] = state.get("clarifications", []) + [answer_text]
-        result["trace"] = [{"node": "ask_user", "question": question, "answer": answer, "picked": picked}]
+        result["trace"] = [{"node": "ask_user", "question": question, "answer": answer,
+                            "matched": [c["id"] for c in matched], "target": result.get("target")}]
         return result
+
+    def _match_answer(self, question: str, answer: str, candidates: list[Candidate]) -> list[Candidate]:
+        """文章での回答が、どの選択肢を指しているかを LLM に判定させる（1 回の呼び出しで 1 件だけ扱う）。"""
+        if not candidates:
+            return []
+        out = self.llm.chat_json(prompts.MATCH_SYSTEM, prompts.match_user(question, answer, candidates),
+                                 prompts.MATCH_SCHEMA)
+        valid = {c["id"]: c for c in candidates}
+        return [valid[i] for i in dict.fromkeys(out.get("matched_ids", [])) if i in valid]
 
     def respond(self, state: AgentState) -> dict:
         sources = collect_sources(state)
@@ -150,7 +181,31 @@ class Nodes:
 
 
 def as_candidate(e: wikimedia.Entity) -> Candidate:
-    return {"id": e.id, "label": e.label, "description": e.description}
+    return {"id": e.id, "label": e.label, "description": e.description, "sitelinks": e.sitelinks}
+
+
+def rank(candidates: list[Candidate]) -> list[Candidate]:
+    """名前のない候補を外し、一般的に知られている順（sitelinks の多い順）に並べる。"""
+    return sorted([c for c in candidates if c.get("label")], key=lambda c: -c.get("sitelinks", 0))
+
+
+def dominant(candidates: list[Candidate]) -> Candidate | None:
+    """1 位が 2 位より圧倒的に一般的なら、その候補を返す（DOMINANCE_RATIO）。"""
+    ranked = rank(candidates)
+    if len(ranked) < 2:
+        return None
+    first, second = ranked[0].get("sitelinks", 0), ranked[1].get("sitelinks", 0)
+    return ranked[0] if first >= DOMINANCE_RATIO * max(second, 1) else None
+
+
+def assumption_text(request: str, chosen: Candidate, candidates: list[Candidate], by_dominance: bool = True) -> str:
+    others = [f"{c['label']}（{c['description']}）" for c in candidates if c["id"] != chosen["id"]][:3]
+    name = f"「{chosen['label']}（{chosen['description']}）」"
+    if by_dominance:
+        text = f"「{request}」は一般に{name}を指すため、それとして調べました。"
+    else:
+        text = f"依頼の内容から{name}のことと判断して調べました。"
+    return text + (f"別のもの（{'、'.join(others)} など）であれば教えてください。" if others else "")
 
 
 def pick_candidate(answer: str, candidates: list[Candidate]) -> Candidate | None:

@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
+import time
 from typing import Any
 
-from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, InternalServerError, OpenAI
 
 from my_llm_app.config import Settings
 
 # 研究室サーバーは共有で同時処理数 4。こちらからの同時リクエストはそれ以下に抑える
 _MAX_CONCURRENCY = 2
 _semaphore = threading.Semaphore(_MAX_CONCURRENCY)
+# 研究室サーバーが一時的に応答しなくなることがあるため、間隔を広げながらやり直す
+_RETRY_WAITS = (10, 30, 60)
+
+log = logging.getLogger(__name__)
 
 
 class LLM:
@@ -25,15 +31,29 @@ class LLM:
         )
 
     def _create(self, messages: list[dict], **kwargs: Any) -> str:
-        with _semaphore:
-            r = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                # 思考モード OFF（応答速度を優先）
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-                **kwargs,
-            )
-        return r.choices[0].message.content or ""
+        for attempt in range(len(_RETRY_WAITS) + 1):
+            started = time.perf_counter()
+            try:
+                with _semaphore:
+                    r = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        # 思考モード OFF（応答速度を優先）
+                        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                        **kwargs,
+                    )
+            except (APIConnectionError, APITimeoutError, InternalServerError) as e:
+                if attempt == len(_RETRY_WAITS):
+                    raise
+                wait = _RETRY_WAITS[attempt]
+                log.warning("LLM に接続できません（%s）。%d 秒後にやり直します", type(e).__name__, wait)
+                time.sleep(wait)
+                continue
+            usage = r.usage
+            log.info("llm: %.1fs (prompt %s, completion %s tokens)", time.perf_counter() - started,
+                     usage.prompt_tokens if usage else "?", usage.completion_tokens if usage else "?")
+            return r.choices[0].message.content or ""
+        raise RuntimeError("unreachable")
 
     def chat_json(self, system: str, user: str, schema: dict, temperature: float = 0.2) -> dict:
         """JSON スキーマに沿った出力を返す。壊れた JSON なら 1 回だけやり直す。"""

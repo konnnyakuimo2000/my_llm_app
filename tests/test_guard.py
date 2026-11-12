@@ -38,11 +38,18 @@ def test_ask_user_after_limit_becomes_respond():
     assert d["action"] == "respond"
 
 
-def test_respond_allowed_when_target_resolved():
-    state = ambiguous_state(target=CANDIDATES[0])
+def test_respond_allowed_when_target_resolved_and_researched():
+    state = ambiguous_state(target=CANDIDATES[0], target_summary="水星は太陽系の惑星。")
     d = check_decision(state, {"action": "respond", "reason": ""})
     assert d["action"] == "respond"
     assert "guard" not in d
+
+
+def test_respond_before_researching_target_becomes_search():
+    # 聞き返しの回答で対象が決まった直後に応答しようとした → 先にその対象を調べる
+    d = check_decision(ambiguous_state(target=CANDIDATES[0]), {"action": "respond", "reason": ""})
+    assert d["action"] == "search"
+    assert d["names"] == ["水星"]
 
 
 def test_duplicate_search_is_blocked():

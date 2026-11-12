@@ -18,6 +18,7 @@ class Entity:
     id: str
     label: str
     description: str
+    sitelinks: int = 0   # 記事がある Wikipedia などの数（どれだけ一般的に知られているかの目安）
 
     @property
     def url(self) -> str:
@@ -59,12 +60,12 @@ def search_entities(query: str, languages: tuple[str, ...] = ("ja", "en"), limit
 
 
 def get_entities(ids: list[str], timeout: float = 30.0) -> dict[str, Entity]:
-    """ID から項目の名前と説明を取る（日本語優先、なければ英語）。"""
+    """ID から項目の名前・説明（日本語優先、なければ英語）と sitelinks の数を取る。"""
     if not ids:
         return {}
     r = httpx.get(
         WIKIDATA_API,
-        params={"action": "wbgetentities", "ids": "|".join(ids[:50]), "props": "labels|descriptions",
+        params={"action": "wbgetentities", "ids": "|".join(ids[:50]), "props": "labels|descriptions|sitelinks",
                 "languages": "ja|en", "format": "json"},
         headers=_HEADERS,
         timeout=timeout,
@@ -75,7 +76,8 @@ def get_entities(ids: list[str], timeout: float = 30.0) -> dict[str, Entity]:
         return (d.get("ja") or d.get("en") or {}).get("value", "")
 
     return {
-        eid: Entity(id=eid, label=pick(e.get("labels", {})), description=pick(e.get("descriptions", {})))
+        eid: Entity(id=eid, label=pick(e.get("labels", {})), description=pick(e.get("descriptions", {})),
+                    sitelinks=len(e.get("sitelinks", {})))
         for eid, e in r.json().get("entities", {}).items()
         if "missing" not in e
     }

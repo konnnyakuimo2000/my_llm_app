@@ -36,7 +36,7 @@ DECIDE_SCHEMA = {
 UPDATE_SYSTEM = """あなたは調査エージェントの「状態を更新する」役です。
 依頼・利用者の回答・現在の状態・新しい検索結果を読み、状態を更新して返します。
 
-- known: わかったこと。text に短い文、source にその根拠の URL（Web 検索の結果の url、または Wikidata の項目の url）を 1 つ入れる。
+- known: わかったこと。text に短い文（60 文字以内）、source にその根拠の URL（Web 検索の結果の url、または Wikidata の項目の url）を 1 つ入れる。
   検索結果に書かれていないことは入れない。依頼や利用者の回答の言い換えは入れない
 - unknown: まだわからないこと（例:「利用者がどの意味のマーキュリーを指しているか」）
 - candidate_ids: 依頼の言葉が指しうる対象の候補を、Wikidata の項目の id（Q 番号）で返す。
@@ -45,12 +45,12 @@ UPDATE_SYSTEM = """あなたは調査エージェントの「状態を更新す�
 
 推測で target_id を決めないこと。利用者が答えていない段階で、複数の意味があるなら target_id は空文字にする。
 「特定できた対象」がすでにある場合は、その id を target_id に入れる。
-target_id が決まったら、known には target についての事実だけを残す（他の意味の説明は消す）。known は重要なものから最大 10 件。"""
+target_id が決まったら、known には target についての事実だけを残す（他の意味の説明は消す）。known は重要なものから最大 8 件。"""
 
 UPDATE_SCHEMA = {
     "type": "object",
     "properties": {
-        "known": {"type": "array", "maxItems": 10, "items": {
+        "known": {"type": "array", "maxItems": 8, "items": {
             "type": "object",
             "properties": {"text": {"type": "string"}, "source": {"type": "string"}},
             "required": ["text", "source"],
@@ -62,12 +62,33 @@ UPDATE_SCHEMA = {
     "required": ["known", "unknown", "candidate_ids", "target_id"],
 }
 
+MATCH_SYSTEM = """あなたは、利用者の回答が選択肢のどれを指しているかを判定する役です。
+- 回答が明らかに指している選択肢の id を matched_ids に入れる
+- 回答に当てはまる選択肢が複数あれば、すべて入れる（例: 回答が「山です」で、山の選択肢が 3 つあれば 3 つとも）
+- 回答が選択肢にないものを指している場合（例: 選択肢に川がないのに「川のほうです」）は空にする。近いものを無理に選ばない"""
+
+MATCH_SCHEMA = {
+    "type": "object",
+    "properties": {"matched_ids": {"type": "array", "items": {"type": "string"}}},
+    "required": ["matched_ids"],
+}
+
+
+def match_user(question: str, answer: str, candidates: list) -> str:
+    return json.dumps({
+        "質問": question.splitlines()[0],
+        "選択肢": [{"id": c["id"], "名前": c["label"], "説明": c["description"]} for c in candidates],
+        "利用者の回答": answer,
+    }, ensure_ascii=False, indent=1)
+
+
 RESPOND_SYSTEM = """あなたは調査結果を利用者に伝える役です。
 与えられた材料（対象の概要・わかったこと・出典）だけを使って、日本語で答えます。
 
 - 材料にないことは書かない。推測で補わない
 - 材料の各項目の末尾にある出典番号（[1] など）を、その事実を書いた文の後ろにそのまま付ける。番号を変えたり、別の事実に付け替えたりしない
 - [出典なし] の項目は使わない
+- 「置いた前提」がある場合は、冒頭にその文をそのまま書く
 - 対象が特定できていない場合は、冒頭でそのことと、置いた前提を正直に書く
 - 対象が特定できている場合は、その対象についてだけ書く。同名の別の意味の説明は書かない
 - わからなかったことがあれば、最後に「わからなかったこと」として書く
@@ -112,6 +133,7 @@ def respond_user(state: AgentState, sources: list[dict]) -> str:
         "依頼": state.get("request", ""),
         "利用者の回答": state.get("clarifications", []),
         "特定できた対象": state.get("target"),
+        "置いた前提": state.get("assumptions", []),
         "対象の概要": f"{summary} [{number[summary_url]}]" if summary and summary_url in number else "",
         "わかったこと": facts,
         "わからないこと": state.get("unknown", []),
