@@ -28,6 +28,23 @@ class Nodes:
         self.settings = settings
         self.llm = llm
 
+    def check_feasibility(self, state: AgentState) -> dict:
+        """公開情報で調べられる依頼かを、調査を始める前に判定する（設計書 4 章 ④、例 D）。"""
+        out = self.llm.chat_json(prompts.FEASIBILITY_SYSTEM, state["request"], prompts.FEASIBILITY_SCHEMA)
+        feasibility = {
+            "verdict": out.get("verdict", "unsure"),
+            "reason": out.get("reason", ""),
+            "infeasible_parts": out.get("infeasible_parts", []),
+            "suggestions": out.get("suggestions", []),
+        }
+        log.info("feasibility: %s (%s)", feasibility["verdict"], feasibility["reason"])
+        return {"feasibility": feasibility, "trace": [{"node": "check_feasibility", "llm": out}]}
+
+    def report_infeasible(self, state: AgentState) -> dict:
+        """調べられない依頼を、探し回らずに正直に申告する（設計書 9.2 の形）。文面はプログラムが作る。"""
+        answer = infeasible_report(state["request"], state["feasibility"])
+        return {"answer": answer, "trace": [{"node": "report_infeasible", "answer": answer}]}
+
     def decide(self, state: AgentState) -> dict:
         raw = self.llm.chat_json(prompts.DECIDE_SYSTEM, prompts.decide_user(state), prompts.DECIDE_SCHEMA)
         decision = check_decision(state, raw)
@@ -85,7 +102,7 @@ class Nodes:
             target = primary
         if target and not state.get("target") and not state.get("clarifications"):
             # 利用者に確かめずに対象を決めた場合は、その判断を前提として報告に書く
-            assumptions = assumptions + [assumption_text(state["request"], target, candidates,
+            assumptions = assumptions + [assumption_text(target, candidates,
                                                          by_dominance=target == dominant(candidates))]
 
         # 根拠の URL は、実際に取得した検索結果・項目のものだけを認める（設計書 M-4 の簡易版）
@@ -150,7 +167,7 @@ class Nodes:
             if primary := dominant(matched):
                 result["target"] = primary
                 result["assumptions"] = state.get("assumptions", []) + [
-                    assumption_text(state["request"], primary, matched)]
+                    assumption_text(primary, matched)]
         else:
             answer_text = answer   # 選択肢にない内容（例:「川のほうです」）→ 次の検索で対象を探す
         result["clarifications"] = state.get("clarifications", []) + [answer_text]
@@ -198,11 +215,12 @@ def dominant(candidates: list[Candidate]) -> Candidate | None:
     return ranked[0] if first >= DOMINANCE_RATIO * max(second, 1) else None
 
 
-def assumption_text(request: str, chosen: Candidate, candidates: list[Candidate], by_dominance: bool = True) -> str:
+def assumption_text(chosen: Candidate, candidates: list[Candidate], by_dominance: bool = True) -> str:
     others = [f"{c['label']}（{c['description']}）" for c in candidates if c["id"] != chosen["id"]][:3]
     name = f"「{chosen['label']}（{chosen['description']}）」"
     if by_dominance:
-        text = f"「{request}」は一般に{name}を指すため、それとして調べました。"
+        # 依頼文は長いことがあるため、対象の名前で書く（例:「富士山」は一般に…）
+        text = f"「{chosen['label']}」は一般に{name}を指すため、それとして調べました。"
     else:
         text = f"依頼の内容から{name}のことと判断して調べました。"
     return text + (f"別のもの（{'、'.join(others)} など）であれば教えてください。" if others else "")
@@ -223,6 +241,25 @@ def collect_sources(state: AgentState) -> list[Source]:
     urls += [k["source"] for k in state.get("known", []) if k.get("source")]
     ordered = list(dict.fromkeys(urls))
     return [{"title": pages.get(u, u), "url": u} for u in ordered]
+
+
+def infeasible_report(request: str, f: dict) -> str:
+    parts = f.get("infeasible_parts") or [request]
+    lines = ["この依頼は、公開されている情報からは調べられないと判断しました。", "",
+             "### 調べられないこと"]
+    lines += [f"- {p}" for p in parts]
+    lines += ["", "### 理由", f.get("reason", "")]
+    lines += ["", "### 試したこと",
+              "公開情報（Web・百科事典など）の検索は行っていません。公開されていない情報は、"
+              "検索しても見つからないか、関係のない情報を誤って示してしまうおそれがあるためです。"]
+    if f.get("suggestions"):
+        lines += ["", "### 代わりにできること"] + [f"- {s}" for s in f["suggestions"]]
+    lines += ["", "公開されている情報で調べられる形（例: 対象の名前や、公開されている資料）があれば、教えてください。"]
+    return "\n".join(lines)
+
+
+def route_feasibility(state: AgentState) -> str:
+    return "report_infeasible" if state["feasibility"]["verdict"] == "no" else "decide"
 
 
 def route(state: AgentState) -> str:
