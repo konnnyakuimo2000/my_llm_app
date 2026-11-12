@@ -34,6 +34,12 @@ def summarize(node: str, update: dict) -> str:
         if d.get("guard"):
             s += f"\n   ⚠ プログラムが変更: {d['guard']}"
         return s
+    if node == "check_feasibility":
+        f = update["feasibility"]
+        s = f"→ 調べられるか: {f['verdict']}（{f['reason']}）"
+        if f["infeasible_parts"]:
+            s += f"\n   調べられない部分: {f['infeasible_parts']}"
+        return s
     if node == "search":
         lines = ["   わかったこと:"]
         lines += [f"     - {k['text']}  <{k['source'] or '出典なし'}>" for k in update.get("known", [])]

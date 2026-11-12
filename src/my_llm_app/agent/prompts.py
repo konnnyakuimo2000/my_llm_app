@@ -6,6 +6,35 @@ import json
 
 from my_llm_app.agent.state import AgentState
 
+FEASIBILITY_SYSTEM = """あなたは、調査の依頼が「公開されている情報（Web・百科事典・公的機関・論文など）」で調べられるかを、
+調査を始める前に判定する役です。
+
+verdict:
+- no: 依頼の中心が、公開情報では原理的に調べられないもの。例:
+  - 公開されていない私的・内部の情報（特定の個人の私生活、家族の情報、社内や研究室の非公開の資料・会議の記録や写真、個人のメールやアカウントの中身）
+  - まだ起きていない事実（将来の株価の終値、試合の結果、くじの当選番号）。ただし予報・予定・予測の記事が公開されているもの（天気予報、発売予定日など）は調べられる
+  - 依頼者本人にしかわからないこと（依頼者の持ち物、依頼者の過去の行動）
+- partial: 依頼の一部は調べられるが、一部は上の理由で調べられない
+- unsure: 判断がつかない（調べてみないとわからない、マイナーなだけで公開されている可能性がある）
+- yes: 公開情報で調べられる
+
+ルール:
+- マイナー・情報が少なそう、というだけでは no にしない（unsure か yes）。迷ったら unsure にする
+- 実在する人物でも、公人や研究者の公開された経歴・業績は調べられる（yes）。私生活や非公開の情報は no
+- infeasible_parts には、調べられない部分を短く書く（yes / unsure なら空）
+- suggestions には、利用者が代わりにできることを 1〜3 個書く（例: 「出席者に写真が残っていないか確認する」「手元の資料を渡してもらえれば内容を整理できる」）。yes なら空"""
+
+FEASIBILITY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["yes", "partial", "no", "unsure"]},
+        "reason": {"type": "string"},
+        "infeasible_parts": {"type": "array", "items": {"type": "string"}},
+        "suggestions": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+    },
+    "required": ["verdict", "reason", "infeasible_parts", "suggestions"],
+}
+
 DECIDE_SYSTEM = """あなたは調査エージェントの「次の行動」を決める役です。
 利用者の依頼と、これまでにわかったこと・わからないことを見て、次の行動を 1 つ選びます。
 
@@ -91,6 +120,7 @@ RESPOND_SYSTEM = """あなたは調査結果を利用者に伝える役です。
 - 「置いた前提」がある場合は、冒頭にその文をそのまま書く
 - 対象が特定できていない場合は、冒頭でそのことと、置いた前提を正直に書く
 - 対象が特定できている場合は、その対象についてだけ書く。同名の別の意味の説明は書かない
+- 「公開情報では調べられない部分」がある場合は、最後に「調べられなかったこと」としてその部分と理由を書く
 - わからなかったことがあれば、最後に「わからなかったこと」として書く
 - 出典一覧そのものは書かない（プログラムが付ける）"""
 
@@ -105,6 +135,7 @@ def _state_view(state: AgentState) -> dict:
         "特定できた対象": state.get("target"),
         "実行した検索": state.get("searched", []),
         "質問した回数": state.get("questions_asked", 0),
+        "公開情報では調べられない部分（調べない）": (state.get("feasibility") or {}).get("infeasible_parts", []),
     }
 
 
@@ -134,6 +165,7 @@ def respond_user(state: AgentState, sources: list[dict]) -> str:
         "利用者の回答": state.get("clarifications", []),
         "特定できた対象": state.get("target"),
         "置いた前提": state.get("assumptions", []),
+        "公開情報では調べられない部分": (state.get("feasibility") or {}).get("infeasible_parts", []),
         "対象の概要": f"{summary} [{number[summary_url]}]" if summary and summary_url in number else "",
         "わかったこと": facts,
         "わからないこと": state.get("unknown", []),

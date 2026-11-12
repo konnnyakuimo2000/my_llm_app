@@ -42,8 +42,16 @@ class Decision(TypedDict, total=False):
     guard: str         # プログラムが LLM の選択を変えた場合の理由
 
 
+class Feasibility(TypedDict):
+    verdict: Literal["yes", "partial", "no", "unsure"]
+    reason: str                       # 判定の理由
+    infeasible_parts: list[str]       # 公開情報では調べられない部分
+    suggestions: list[str]            # 代わりにできること
+
+
 class AgentState(TypedDict, total=False):
     request: str                      # 利用者の依頼（原文）
+    feasibility: Feasibility          # 公開情報で調べられる依頼かの判定（設計書 4 章 ④）
     clarifications: list[str]         # 質問に対する利用者の回答
     known: list[Fact]                 # わかったこと（根拠の URL 付き）
     unknown: list[str]                # わからないこと
